@@ -1,0 +1,370 @@
+---
+title: "Database Migration: TB"
+author:
+- Stephen Jones
+date: "April 20, 2019"
+output:
+  rmdformats::readthedown:
+    gallery: no
+    highlight: tango
+    lightbox: yes
+    self_contained: yes
+    thumbnails: yes
+    code_folding: hide
+  html_document:
+    df_print: paged
+---  
+
+<style type="text/css">
+pre {
+  max-height: 150px;
+  float: left;
+  width: 100%;
+  overflow-y: auto;
+}
+pre.r {
+max-height: none;
+}
+h1.title {
+  color: DarkBlue;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+  color: DarkBlue;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+  color: DarkBlue;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+  color: DarkBlue;
+  font-weight: bold;
+}
+h4 { /* Header 3 */
+  color: DarkBlue;
+  font-weight: bold;
+}
+</style>
+#Preparation  
+
+First, all items are removed from the workspace. Packages `RMySQL`, `DBI` are loaded to query the local copy of the tuberculosis database created earlier in the semester. The working directory is set to `C:/MSDS/Neo4jDesktop` and the table written to .csv; this path must exist to run the following code chunk.
+
+```{r message=FALSE,warning=FALSE,eval=FALSE}
+
+rm(list=ls())
+#grab data from localhost
+library(RMySQL)
+
+# Load the DBI library
+library(DBI)
+# configure connection to MySQL
+getSqlConnection <- function() {
+  con <-dbConnect(RMySQL::MySQL(),
+                  username = 'root',#other ids set up are 'achan' and 'mhayes'
+                  password = '1NeWpW1NeWpW',#we all can use the same password
+                  host = 'localhost',#this is the IP address of the cloud instance
+                  dbname = 'tb')
+  return(con)
+}
+
+#n=-1 is necessary to grab all records instead of default 500.
+connection <- getSqlConnection()
+reqst <- dbSendQuery(connection,"select * from tb")
+tb_data <- dbFetch(reqst, n=-1)
+
+#working directory is set
+setwd('C:/MSDS/Neo4jDesktop')
+write.csv(tb_data,"tb_data.csv",row.names=TRUE,na="")
+
+```
+
+The file `tb_data.csv` was uploaded to github (https://raw.githubusercontent.com/sigmasigmaiota/graph/master/tb_data.csv) and downloaded again to prepare for migration to a Neo4j database. The package `dplyr` is used; rownumbers are omitted below.  
+
+```{r message=FALSE,warning=FALSE}
+
+library(dplyr)
+
+file<-("https://raw.githubusercontent.com/sigmasigmaiota/graph/master/tb_data.csv")
+file2<-file(file,open="r")
+tb<-read.csv(file2,header = TRUE,stringsAsFactors = FALSE)
+tb[,1]<-NULL
+tb<-na.omit(tb)
+
+```
+
+The password and id for the database are recorded in a hidden code chunk.  
+
+```{r message=FALSE,warning=FALSE,echo=FALSE}
+
+pw<-"NewPassword"
+id<-"neo4j"
+
+```  
+
+Using the package `RNeo4j`, a connection is initiated with the database.  
+
+```{r message=FALSE,warning=FALSE}
+
+library(RNeo4j)
+
+#initiate connection to the database
+graphtb <- startGraph("http://localhost:7474/db/data", username=id, password=pw)
+
+```
+
+```{r  message=FALSE,warning=FALSE}
+
+#create a query that establishes structure upon which relationships will be detailed
+query = "
+MERGE (:country {country:{country},year:{year},sex:{sex},child:{child},adult:{adult},elderly:{elderly}})
+MERGE (:year {year:{year},sex:{sex},child:{child},adult:{adult},elderly:{elderly},country:{country}})
+MERGE (:sex {sex:{sex},child:{child},adult:{adult},elderly:{elderly},country:{country},year:{year}})
+MERGE (:child {child:{child},adult:{adult},elderly:{elderly},year:{year},country:{country},year:{year}})
+MERGE (:adult {adult:{adult},child:{child},elderly:{elderly},year:{year},country:{country},year:{year}})
+MERGE (:elderly {elderly:{elderly},adult:{adult},child:{child},year:{year},country:{country},year:{year}})
+"
+#create a transaction
+tx <- newTransaction(graphtb)
+
+#Upload data to the database row by row.
+for (i in 1:nrow(tb)) {
+  # Upload in blocks of 1000.
+  if(i %% 1000 == 0) {
+    # Commit current transaction.
+    commit(tx)
+    # Call transaction.
+    tx = newTransaction(graphtb)
+  }
+
+  # implement the query structure detailed above.
+  appendCypher(tx,
+               query,
+               country = tb$country[i],
+               year = tb$year[i],
+               sex = tb$sex[i],
+               child = tb$child[i],
+               adult = tb$adult[i],
+               elderly = tb$elderly[i])
+}
+#finish with one laset command.
+commit(tx)
+
+```
+
+With the data uploaded to the Neo4j database, relationships must be defined. I define country-to-year relationship (`c_year`), year-to-male adult (`m_adult`), year-to-female adult (`f_adult`), and so on until the relationships in the dataframe are fully described.  
+
+```{r message=FALSE,warning=FALSE}
+
+#country to year
+query2<-"MATCH (a:country),(b:year) WHERE (a.year) = (b.year) CREATE (a)-[:c_year]->(b)"
+tx2 = newTransaction(graphtb)
+appendCypher(tx2, query2)
+commit(tx2)
+
+#year to cases, male adults
+query3<-"MATCH (a:year),(b:adult) WHERE (a.year) = (b.year) AND (a.sex) = 'male' CREATE (a)-[:m_adult]->(b)"
+tx3 = newTransaction(graphtb)
+appendCypher(tx3, query3)
+commit(tx3)
+
+#year to cases, female adults
+query4<-"MATCH (a:year),(b:adult) WHERE (a.year) = (b.year) AND (a.sex) = 'female' CREATE (a)-[:f_adult]->(b)"
+tx4 = newTransaction(graphtb)
+appendCypher(tx4, query4)
+commit(tx4)
+
+#year to cases, male children
+query5<-"MATCH (a:year),(b:child) WHERE (a.year) = (b.year) AND (a.sex) = 'male' CREATE (a)-[:m_child]->(b)"
+tx5 = newTransaction(graphtb)
+appendCypher(tx5, query5)
+commit(tx5)
+
+#year to cases, female children
+query6<-"MATCH (a:year),(b:child) WHERE (a.year) = (b.year) AND (a.sex) = 'female' CREATE (a)-[:f_child]->(b)"
+tx6 = newTransaction(graphtb)
+appendCypher(tx6, query6)
+commit(tx6)
+
+#year to cases, male elderly
+query7<-"MATCH (a:year),(b:elderly) WHERE (a.year) = (b.year) AND (a.sex) = 'male' CREATE (a)-[:m_eld]->(b)"
+tx7 = newTransaction(graphtb)
+appendCypher(tx7, query7)
+commit(tx7)
+
+#year to cases, female elderly
+query8<-"MATCH (a:year),(b:elderly) WHERE (a.year) = (b.year) AND (a.sex) = 'female' CREATE (a)-[:f_eld]->(b)"
+tx8 = newTransaction(graphtb)
+appendCypher(tx8, query8)
+commit(tx8)
+
+```
+
+A quick check in the Neo4j browser window confirms the relationships have been set.  
+
+#Query: U.S. and Mexico  
+
+Data for the U.S. and Mexico can provide a glimpse into the prevalence of tb in North America in the past few decades. In the query below, adults, children, and the elderly are called; the number of cases will reflect a sum of all three demographic groups. The package `DT` displays the resulting dataframe `qcountry`.  
+
+
+```{r message=FALSE,warning=FALSE}
+
+#query for United States and Mexico; all cases are totaled in the last command.
+query <- "MATCH (a:country)-->(b:year)
+WHERE a.country = 'United States of America' 
+OR a.country = 'Mexico' 
+AND a.country = b.country AND a.year = b.year
+RETURN a.country AS country, SUM(DISTINCT a.adult+a.child+a.elderly) AS cases, b.year AS year"
+
+#data frame stores results
+qcountry <- cypher(graphtb, query)
+
+library(DT)
+#view results
+datatable(qcountry)
+
+```
+
+#Plot: U.S. and Mexico  
+
+`igraph` and `visNetwork` are used to plot the data. Two dataframes are created; in `edges` I define which nodes are to be associated, while in `nodes` I list every node to be included. Each dataframe is derived from `qcountry`.  
+
+```{r message=FALSE,warning=FALSE}
+
+library(igraph)
+library(visNetwork)
+
+
+edges1<-qcountry[c("country","cases")]
+colnames(edges1)<-c("from","to")
+edges2<-qcountry[c("cases","year")]
+colnames(edges2)<-c("from","to")
+edges<-data.frame(rbind(edges1,edges2))
+
+nodes<-data.frame(id=unique(c(qcountry$country,qcountry$year,qcountry$cases)),
+                  font.size=32)
+nodes$label<-nodes$id
+nodes$font.size<-ifelse(nodes$id=="United States of America" | nodes$id=="Mexico",48,24)
+nodes$level[nodes$id=="United States of America"]<-1
+nodes$level[nodes$id>=1995 & nodes$id <= 2013]<-3
+nodes$level[nodes$id=="Mexico"]<-5
+nodes$level[nodes$id==6934|nodes$id==6623|nodes$id==6274|nodes$id==5884|nodes$id==5651|nodes$id==5434|
+              nodes$id==5365|nodes$id==5251|nodes$id==5089|nodes$id==13767|nodes$id==13283|
+              nodes$id==12893|nodes$id==11370|nodes$id==10305|nodes$id==10319|nodes$id==9918|
+              nodes$id==9106|nodes$id==8091|nodes$id==7452]<-2
+nodes$level[is.na(nodes$level)]<-4
+
+```  
+
+In order to customize the plot I have included `level` and `font.size` in the nodes dataframe; the level assignment orders the nodes such that the U.S. node is at the top of the plot and the Mexico node is at the bottom of the plot. Years will be listed in the middle. I've used the `visHierarchicalLayout` command to accomplish this customization.  
+Additionally, colors are selected via clustering and "betweenness", which is defined as the importance of each node to the graph. The greater the number of connections to a node the higher the index of "betweenness"; this is calculated using `igraph` and merged with the dataframe,then used to determine color, group and node size in the plot.  
+
+```{r message=FALSE, warning=FALSE}
+
+#vertices are nodes, base data are edges.
+gd<- graph.data.frame(edges, directed=FALSE, vertices=nodes)
+
+#calculate betweenness and store as "value"
+nodes$value <- betweenness(gd)
+
+#determine cluster via betweenness
+cluster <- cluster_edge_betweenness(gd)
+
+#set group identity
+nodes$group <- cluster$membership
+
+#plot the result
+visNetwork(nodes, edges, main = list(text = "Tuberculosis, U.S. and Mexico",
+                                     style = "font-family:Calibri;font-weight:bold;font-size:22px;text-align:center;"),
+           width = "100%")%>%
+  visHierarchicalLayout(
+    direction="UD",
+    treeSpacing = 500
+  )
+```
+
+#Query: South America  
+
+To plot a few countries in South America I'll follow the same process.  
+
+```{r message=FALSE,warning=FALSE}
+
+#query for countries in South America; all cases are totaled in the last command.
+query <- "MATCH (a:country)-->(b:year)
+WHERE a.country = 'Argentina' 
+OR a.country = 'Brazil' 
+OR a.country = 'Chile'
+OR a.country = 'Venezuela (Bolivarian Republic of)'
+OR a.country = 'Peru'
+OR a.country = 'Colombia'
+AND a.country = b.country AND a.year = b.year
+RETURN a.country AS country, SUM(DISTINCT a.adult+a.child+a.elderly) AS cases, b.year AS year"
+
+#data frame stores results
+SAcountry <- cypher(graphtb, query)
+
+library(DT)
+#view results
+datatable(SAcountry)
+
+```
+
+#Plot: South America  
+
+Venezuela's name is abbreviated to fit in the plot, and cases for each country are assigned a level via comparison with a list of values. Font sizes are adjusted.  
+
+```{r message=FALSE,warning=FALSE}
+
+edges1<-SAcountry[c("country","cases")]
+colnames(edges1)<-c("from","to")
+edges2<-SAcountry[c("cases","year")]
+colnames(edges2)<-c("from","to")
+edges<-data.frame(rbind(edges1,edges2))
+edges$from[edges$from=="Venezuela (Bolivarian Republic of)"]<-"Venezuela"
+
+#keep case totals from the countries we'd like to put at the top of the plot
+caseslist<-SAcountry$cases[SAcountry$country=="Brazil" | SAcountry$country=="Chile" | SAcountry$country=="Peru"]
+nodes<-data.frame(id=unique(c(SAcountry$country,SAcountry$year,SAcountry$cases)),
+                  font.size=32)
+nodes$id[nodes$id=="Venezuela (Bolivarian Republic of)"]<-"Venezuela"
+nodes$label<-nodes$id
+nodes$font.size<-ifelse(nodes$id=="Brazil" | nodes$id=="Chile" |
+                          nodes$id=="Peru" | nodes$id=="Colombia" |
+                          nodes$id=="Venezuela" | nodes$id=="Argentina",48,14)
+nodes$level[nodes$id=="Brazil" | nodes$id=="Chile" | nodes$id=="Peru"]<-1
+
+nodes$level[nodes$id>=1995 & nodes$id <= 2013]<-3
+nodes$level[nodes$id=="Colombia" | nodes$id=="Venezuela" | nodes$id=="Argentina"]<-5
+
+#assign levels to case totals of countries at the top of the plot
+condition<-nodes$id %in% caseslist
+nodes$level[condition]<-2
+
+nodes$level[is.na(nodes$level)]<-4
+
+#vertices are nodes, base data are edges.
+gd<- graph.data.frame(edges, directed=FALSE, vertices=nodes)
+
+#calculate betweenness and store as "value"
+nodes$value <- betweenness(gd)
+
+#determine cluster via betweenness
+cluster <- cluster_edge_betweenness(gd)
+
+#set group identity
+nodes$group <- cluster$membership
+
+#plot the result
+visNetwork(nodes, edges, main = list(text = "Tuberculosis, South America",
+                                     style = "font-family:Calibri;font-weight:bold;font-size:22px;text-align:center;"),
+           width = "100%")%>%
+  visHierarchicalLayout(
+    direction="UD",
+    treeSpacing = 500
+  )
+
+```  
+
+#Advantages and Disadvantages  
+
+In my opinion, the main advantages of NoSQL databases such as Neo4j are performance and scalability. According to popular opinion, NoSQL databases are better suited for big data, whether structured or unstructured; they make use of object-oriented programming and process queries more quickly. Additionally, NoSQL platforms tend to be open source. NoSQL will no doubt gain traction as it is adopted by more business organizations.
